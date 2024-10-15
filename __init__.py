@@ -19,7 +19,7 @@
 bl_info = {
     "name": "Apply Instance Transform",
     "author": "Andrei Suvorau",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (3, 00, 0),
     "location": "Object > Apply",
     "description": ("Apply Instance Transform"),
@@ -31,6 +31,7 @@ bl_info = {
 
 
 import bpy
+import math
 import mathutils
 
 
@@ -41,7 +42,7 @@ def apply_transfrom(object, use_location = False, use_rotation = False, use_scal
     location, rotation, scale = matrix.decompose()
 
     T = mathutils.Matrix.Translation(location)
-    R = matrix.to_3x3().normalized().to_4x4()
+    R = rotation.to_matrix().to_4x4()
     S = mathutils.Matrix.Diagonal(scale).to_4x4()
 
     transform = [I, I, I]
@@ -61,7 +62,16 @@ def apply_transfrom(object, use_location = False, use_rotation = False, use_scal
     
     if hasattr(object.data, "transform"):
         object.data.transform(M)
-        
+
+    # If we apply negative scale the normals get flipped. Flip them back.
+    if scale[0] * scale[1] * scale[2] < 0:
+        bpy.ops.object.select_all(action='DESELECT')
+        object.select_set(True)
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.flip_normals()
+        bpy.ops.object.mode_set(mode='OBJECT')
+
     for child in object.children:
         child.matrix_local = M @ child.matrix_local
         
@@ -80,22 +90,45 @@ class ApplyInstanceTransform_OT(bpy.types.Operator):
     scale: bpy.props.BoolProperty(name = "Scale")
 
     def execute(self, context):
-        if bpy.context.active_object and bpy.context.active_object.select_get() and bpy.context.active_object.type == 'MESH':
-            M = apply_transfrom(bpy.context.active_object, self.location, self.rotation, self.scale)
-            
-            result = 1
+        data_to_objects = {}
+        result = 0
 
-            for object in bpy.data.objects:
-                if object.type == 'MESH' and object.data == bpy.context.active_object.data and object != bpy.context.active_object:
-                    object.matrix_local = object.matrix_local @ M
-                    result = result + 1
+        # Find all datas we're about to adjust.
+        for obj in bpy.context.selected_objects:
+            if obj.type == 'MESH':
+                data_to_objects.setdefault(obj.data, [])
 
-            self.report({'INFO'}, '%d instances were adjusted.' % result)
-            
-            return {'FINISHED'}
-        else:
-            self.report({'ERROR'}, 'Active object must be mesh.')
-            return {'CANCELLED'}
+        # Find all objects that use each data.
+        for obj in bpy.data.objects:
+            if obj.type == 'MESH' and obj.data in data_to_objects:
+                data_to_objects[obj.data].append(obj)
+
+        # Apply instance transform.
+        for data, objects in data_to_objects.items():
+            base_object = None
+            base_volume = -1
+
+            # Find largest instance by volume. The largest instance will represent UV.
+            for obj in objects:
+                obj_volume = abs(obj.scale[0]) * abs(obj.scale[1]) * abs(obj.scale[2])
+                if obj_volume > base_volume:
+                    base_object = obj
+                    base_volume = obj_volume
+
+            if base_object is not None:
+                # Apply transform the largest instance's transform to data.
+                M = apply_transfrom(base_object, self.location, self.rotation, self.scale)
+
+                # Adjust transforms of other instances accordingly.
+                for obj in objects:
+                    if obj != base_object:
+                        obj.matrix_local = obj.matrix_local @ M
+
+            result = result + len(objects)
+
+        self.report({'INFO'}, '%d instances were adjusted.' % result)
+        
+        return {'FINISHED'}
 
 
 def VIEW3D_ApplyInstanceTransform_Menu(self, context):
